@@ -191,3 +191,9 @@ gzip -dc wham-gmr_local.tar.gz | docker load
 - 项目目录通过 volume 挂载到容器 `/workspace`
 
 最低延迟模式可设置 `WHAM_LATEST_FRAME_KEEP=1 WHAM_ADAPTIVE_KEEP=0`。此时四段 webcam 队列在写入时替换旧帧，慢阶段恢复后直接取最新帧；中间动作会被跳过。默认的自适应窗口仍保留多帧以维持快速动作的连续性。
+
+### 实时 TCP 预览节奏
+
+`VIDEO=0`、TCP 机器人预览且无本地窗口/录制时，默认开启 `GMR_PACED_PREVIEW=1`：摄像头画面在独立线程按最多 15 FPS 发送，机器人在独立线程按最多 12 FPS 渲染，并用约 160 ms 的响应时间平滑显示姿态。推理结果和 CSV 不做插值；摄像头帧在输入积压时只保留最新一帧。TCP 预览默认高度为 360 像素，以控制新增的渲染负载。
+
+可用 `GMR_PREVIEW_FPS`、`GMR_PREVIEW_RESPONSE_MS`、`GMR_TCP_RENDER_HEIGHT`、`WHAM_TCP_PREVIEW_FPS` 和 `WHAM_TCP_PREVIEW_HEIGHT` 调整观感与开销；设置 `GMR_PACED_PREVIEW=0` 可切回原先随 WHAM 输出更新的预览。评估时应同时比较人和机器人画面的帧间隔、动作延迟与 GPU/CPU 占用；摄像头直通画面可能领先经过推理的机器人动作。
