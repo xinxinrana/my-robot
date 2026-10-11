@@ -73,7 +73,7 @@ docker run --gpus all --rm \
 
 ## 浏览器实时预览
 
-需要 TCP 图片预览时，在接收图片的宿主机上运行 `python scripts/camera_preview_server.py`，打开 `http://127.0.0.1:8098`。生产端启动时须设 `TCP=1`，并能连接该宿主机的 TCP 9876 端口。新版接收端保持两条 MJPEG 流，图片一到就推给浏览器；慢浏览器只取最新 JPEG，每条流最多推送 15 FPS，不会重放积压帧。`/status` 会给出输入帧数、最新帧年龄和到达间隔的 p95，便于定位源头是否仍在卡顿。
+需要 TCP 图片预览时，在接收图片的宿主机上运行 `python scripts/camera_preview_server.py`，打开 `http://127.0.0.1:8098`。生产端启动时须设 `TCP=1`，并能连接该宿主机的 TCP 9876 端口。若生产端在 Linux Docker 容器内而接收端在宿主机，可用 `--network host`；若使用桥接网络，则设置 `WHAM_TCP_HOST` 为宿主机在容器内可访问的地址。端口可用 `WHAM_TCP_PORT` 指定，默认 9876。新版接收端保持两条 MJPEG 流，图片一到就推给浏览器；慢浏览器只取最新 JPEG，每条流最多推送 15 FPS，不会重放积压帧。`/status` 会给出输入帧数、最新帧年龄和到达间隔的 p95，便于定位源头是否仍在卡顿。
 
 可用 `PREVIEW_TCP_PORT`、`PREVIEW_HTTP_PORT` 和 `PREVIEW_MAX_FPS` 调整端口与呈现上限。这个接收端只去掉旧页面每 300 ms 拉图一次的限制，不会增加 WHAM/GMR 实际产生新动作的频率；若机器人源流本身只有约 2 FPS，仍需要先查推理与渲染耗时。请先停止占用相同端口的旧预览服务，再启动新版接收端。
 

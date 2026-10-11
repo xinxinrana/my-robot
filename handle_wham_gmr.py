@@ -253,11 +253,11 @@ def _tail_apply_yup_to_zup(root_orient, trans):
 
 
 class TcpStreamSender:
-    """Send JPEG frames to Unity StreamReceiver via TCP (127.0.0.1:9876)."""
+    """Send JPEG frames to the configured preview receiver via TCP."""
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 9876):
-        self._host = host
-        self._port = port
+    def __init__(self, host: str | None = None, port: int | None = None):
+        self._host = host if host is not None else os.environ.get("WHAM_TCP_HOST", "127.0.0.1")
+        self._port = port if port is not None else int(os.environ.get("WHAM_TCP_PORT", "9876"))
         self._sock: socket.socket | None = None
         self._lock = threading.Lock()
 
