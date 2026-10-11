@@ -14,7 +14,7 @@ import threading
 import time
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 
 class LatestFrameStore:
@@ -102,9 +102,30 @@ PAGE = b"""<!doctype html><html lang=zh><meta charset=utf-8>
 img{width:100%;max-height:78vh;object-fit:contain;background:#222;border-radius:8px}
 small{color:#aaa}</style><h1>WHAM GMR live preview</h1>
 <small id=status>Waiting for frames...</small><div class=grid>
-<div class=panel><h2>Camera / WHAM</h2><img src=/stream/0></div>
-<div class=panel><h2>Robot / GMR</h2><img src=/stream/1></div></div>
-<script>setInterval(()=>fetch('/status').then(r=>r.json()).then(x=>{
+<div class=panel><h2>Camera / WHAM</h2><img id=frame0></div>
+<div class=panel><h2>Robot / GMR</h2><img id=frame1></div></div>
+<script>
+async function showLatest(id) {
+  const image = document.getElementById('frame'+id);
+  let count = 0;
+  for (;;) {
+    try {
+      const response = await fetch('/frame/'+id+'?after='+count, {cache:'no-store'});
+      if (response.status === 204) continue;
+      if (!response.ok) throw new Error('preview HTTP '+response.status);
+      count = Number(response.headers.get('X-Frame-Count'));
+      const next = URL.createObjectURL(await response.blob());
+      const previous = image.src.startsWith('blob:') ? image.src : null;
+      image.src = next;
+      if (previous) setTimeout(() => URL.revokeObjectURL(previous), 1000);
+      await new Promise(resolve => setTimeout(resolve, __FRAME_WAIT_MS__));
+    } catch (_) {
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+  }
+}
+showLatest(0); showLatest(1);
+setInterval(()=>fetch('/status').then(r=>r.json()).then(x=>{
 document.getElementById('status').textContent=
 'Camera: '+x['0']+' frames, age '+x.age_ms['0']+' ms, gap p95 '+x.gap_p95_ms['0']+' ms | '+
 'Robot: '+x['1']+' frames, age '+x.age_ms['1']+' ms, gap p95 '+x.gap_p95_ms['1']+' ms';
@@ -116,9 +137,13 @@ class PreviewHandler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        path = urlsplit(self.path).path
+        url = urlsplit(self.path)
+        path = url.path
         if path.startswith("/stream/"):
             self._stream(path)
+            return
+        if path.startswith("/frame/"):
+            self._frame(path, url.query)
             return
         if path == "/status":
             body = json.dumps(self.server.frame_store.status()).encode("utf-8")
@@ -130,13 +155,36 @@ class PreviewHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if path == "/":
+            page = PAGE.replace(b"__FRAME_WAIT_MS__", str(round(1000 / self.server.max_fps)).encode("ascii"))
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(PAGE)))
+            self.send_header("Content-Length", str(len(page)))
             self.end_headers()
-            self.wfile.write(PAGE)
+            self.wfile.write(page)
             return
         self.send_error(404)
+
+    def _frame(self, path, query):
+        try:
+            stream_id = int(path.removeprefix("/frame/"))
+            after = int(parse_qs(query).get("after", ["0"])[0])
+            if stream_id not in (0, 1) or after < 0:
+                raise ValueError
+        except ValueError:
+            self.send_error(404)
+            return
+        count, image = self.server.frame_store.latest_after(stream_id, after, timeout=5.0)
+        if count == after or not image:
+            self.send_response(204)
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(image)))
+        self.send_header("X-Frame-Count", str(count))
+        self.end_headers()
+        self.wfile.write(image)
 
     def _stream(self, path):
         try:

@@ -56,6 +56,38 @@ class LatestFrameStoreTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=3)
 
+    def test_long_poll_returns_latest_jpeg_when_new_frame_arrives(self):
+        store = LatestFrameStore()
+        store.publish(0, b"old")
+        server = make_http_server(store, port=0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+        try:
+            conn.request("GET", "/frame/0?after=0")
+            response = conn.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.getheader("X-Frame-Count"), "1")
+            self.assertEqual(response.read(), b"old")
+
+            def publish_newer():
+                store.publish(0, b"middle")
+                store.publish(0, b"newest")
+
+            timer = threading.Timer(0.05, publish_newer)
+            timer.start()
+            conn.request("GET", "/frame/0?after=1")
+            response = conn.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.getheader("X-Frame-Count"), "3")
+            self.assertEqual(response.read(), b"newest")
+            timer.join(timeout=1)
+        finally:
+            conn.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
 
 if __name__ == "__main__":
     unittest.main()
