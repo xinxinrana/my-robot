@@ -2,7 +2,7 @@
 
 镜像：`11111p5p/wham-gmr:latest`（Docker Hub）。
 
-> ⚠️ 镜像必须包含 `scripts/pipeline_watchdog.py`、`scripts/latest_frame_queue.py` 与 `scripts/paced_preview.py`，
+> ⚠️ 镜像必须包含 `scripts/pipeline_watchdog.py` 与 `scripts/latest_frame_queue.py`，
 > 否则运行时报 `ModuleNotFoundError: No module named 'scripts.pipeline_watchdog'`。
 > 增量重建：`docker build -f docker/Dockerfile.patch -t 11111p5p/wham-gmr:latest .`，然后 `docker push`。
 
