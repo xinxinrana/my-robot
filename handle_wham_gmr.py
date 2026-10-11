@@ -1710,9 +1710,6 @@ def run_stream_mt(
     t2.start()
     t3.start()
     t4.start()
-    if is_webcam and env_flag("PIPELINE_WATCHDOG", True):
-        threading.Thread(target=pipeline_watchdog, daemon=True, name="pipeline-watchdog").start()
-        logger.info(f"[Watchdog] enabled timeout={watchdog_timeout_s:.1f}s")
     if terminal_listener is not None:
         terminal_listener.start()
     if record_whamvideo or preview_window_enabled:
@@ -2502,6 +2499,12 @@ def run_stream_mt(
         )
         state["worker_thread"] = worker
         worker.start()
+
+    # Start monitoring after downstream workers exist. Otherwise normal GMR
+    # initialization can block a full upstream queue and look like a stall.
+    if is_webcam and env_flag("PIPELINE_WATCHDOG", True):
+        threading.Thread(target=pipeline_watchdog, daemon=True, name="pipeline-watchdog").start()
+        logger.info(f"[Watchdog] enabled timeout={watchdog_timeout_s:.1f}s")
 
     # Register SIGINT handler so Ctrl+C sets stop flags gracefully instead of
     # interrupting PyTorch / MuJoCo native code mid-operation (which causes segfaults).
