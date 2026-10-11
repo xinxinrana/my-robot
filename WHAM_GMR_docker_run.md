@@ -70,3 +70,9 @@ docker run --gpus all --rm \
 
 - Windows 摄像头实时：用本机 `run.ps1`（`$env:VIDEO="0"`），Docker 透传不了摄像头。
 - Linux 摄像头：容器内固定开 `VideoCapture(0)`，所以 `--device /dev/videoN:/dev/video0` 必须映射成 `/dev/video0`。
+
+## 浏览器实时预览
+
+需要 TCP 图片预览时，在接收图片的宿主机上运行 `python scripts/camera_preview_server.py`，打开 `http://127.0.0.1:8098`。生产端需能连接该宿主机的 TCP 9876 端口。新版接收端保持两条 MJPEG 流，图片一到就推给浏览器；慢浏览器只取最新 JPEG，每条流最多推送 15 FPS，不会重放积压帧。`/status` 会给出输入帧数、最新帧年龄和到达间隔的 p95，便于定位源头是否仍在卡顿。
+
+可用 `PREVIEW_TCP_PORT`、`PREVIEW_HTTP_PORT` 和 `PREVIEW_MAX_FPS` 调整端口与呈现上限。这个接收端只去掉旧页面每 300 ms 拉图一次的限制，不会增加 WHAM/GMR 实际产生新动作的频率；若机器人源流本身只有约 2 FPS，仍需要先查推理与渲染耗时。请先停止占用相同端口的旧预览服务，再启动新版接收端。
