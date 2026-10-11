@@ -73,6 +73,10 @@ docker run --gpus all --rm \
 
 ## 浏览器实时预览
 
-需要 TCP 图片预览时，在接收图片的宿主机上运行 `python scripts/camera_preview_server.py`，打开 `http://127.0.0.1:8098`。生产端需能连接该宿主机的 TCP 9876 端口。新版接收端保持两条 MJPEG 流，图片一到就推给浏览器；慢浏览器只取最新 JPEG，每条流最多推送 15 FPS，不会重放积压帧。`/status` 会给出输入帧数、最新帧年龄和到达间隔的 p95，便于定位源头是否仍在卡顿。
+需要 TCP 图片预览时，在接收图片的宿主机上运行 `python scripts/camera_preview_server.py`，打开 `http://127.0.0.1:8098`。生产端启动时须设 `TCP=1`，并能连接该宿主机的 TCP 9876 端口。新版接收端保持两条 MJPEG 流，图片一到就推给浏览器；慢浏览器只取最新 JPEG，每条流最多推送 15 FPS，不会重放积压帧。`/status` 会给出输入帧数、最新帧年龄和到达间隔的 p95，便于定位源头是否仍在卡顿。
 
 可用 `PREVIEW_TCP_PORT`、`PREVIEW_HTTP_PORT` 和 `PREVIEW_MAX_FPS` 调整端口与呈现上限。这个接收端只去掉旧页面每 300 ms 拉图一次的限制，不会增加 WHAM/GMR 实际产生新动作的频率；若机器人源流本身只有约 2 FPS，仍需要先查推理与渲染耗时。请先停止占用相同端口的旧预览服务，再启动新版接收端。
+
+摄像头、`--tcp`、无头 MuJoCo 且不录视频时，生产端默认开启统一展示时钟 `TCP_PRESENT_CLOCK=1`。相机采集持续更新最新画面；机器人预览按 `GMR_PREVIEW_FPS=15` 的时隙从最新 IK 姿态渲染。展示错过时隙会跳到下一个时隙，不补发旧图；两条 TCP 流由同一个展示线程发送。机器人姿态只在展示时以 `TCP_PRESENT_RESPONSE_MS=120` 毫秒的响应时间做因果平滑，不改变 CSV、PKL 或 IK 结果。原渲染分辨率保持不变。
+
+观察日志中的 `[Present]`：`skipped` 是错过的展示时隙，`camera_gap_p95_ms` 和 `robot_gap_p95_ms` 是实际发送间隔，`camera_age_ms` 与 `robot_age_ms` 是画面所依据的采集帧年龄。接收端 `/status` 可核对网络到达节奏。若 GPU 渲染赶不上 15 FPS，先降低 `GMR_PREVIEW_FPS` 到设备能稳定维持的值，并对比机器人帧龄；可用 `TCP_PRESENT_CLOCK=0` 回退原路径。`WHAM_GPU_SCHEDULER=1` 时 MuJoCo 渲染也会在 WHAM 前向计算期间让出 GPU。相机与机器人计算延迟不同，统一时钟只能稳定展示节奏，不能保证两者动作在同一源时间戳上对齐。

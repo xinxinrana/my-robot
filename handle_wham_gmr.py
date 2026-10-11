@@ -24,6 +24,7 @@ from general_motion_retargeting.kinematics_model import KinematicsModel
 from scripts.smplx_to_robot_stream import OnlineQposPostprocessor
 from scripts.pipeline_watchdog import PipelineProgress
 from scripts.latest_frame_queue import LatestFrameQueue
+from scripts.presentation_clock import DisplayPose, PresentationClock
 
 SMPLX_FOLDER = HERE / "assets" / "body_models"
 
@@ -529,6 +530,12 @@ def run_stream_mt(
     # mp4 recording is a SEPARATE switch (RECORD_GMRVIDEO), so a live window
     # does NOT imply video encoding.
     show_gmr_window = not env_flag('GMR_HEADLESS_RECORD', True)
+    paced_tcp_preview = (
+        is_webcam and gmr_args is not None and bool(getattr(gmr_args, 'tcp', False))
+        and tcp_stream_gmr and not show_gmr_window and not gmr_args.record_gmrvideo
+        and not record_whamvideo and capture_interval == 0
+        and env_flag('TCP_PRESENT_CLOCK', True)
+    )
 
     if is_cuda_device:
         torch.backends.cudnn.benchmark = True
@@ -566,13 +573,15 @@ def run_stream_mt(
     heartbeat_frames = max(1, int(os.environ.get('PIPELINE_HEARTBEAT_FRAMES', '30')))
     low_memory_mode = env_flag("WHAM_LOW_MEMORY_MODE", False)
     pipeline_queue_size = max(2, int(os.environ.get("WHAM_PIPELINE_QUEUE_SIZE", "10")))
-    gmr_preview_fps = max(0.5, float(os.environ.get("GMR_PREVIEW_FPS", "3.0")))
+    gmr_preview_fps = max(0.5, float(os.environ.get("GMR_PREVIEW_FPS", "15.0" if paced_tcp_preview else "3.0")))
     gmr_preview_interval = 1.0 / gmr_preview_fps
+    display_response_s = max(0.0, float(os.environ.get('TCP_PRESENT_RESPONSE_MS', '120'))) / 1000.0
     logger.info(
         f"[Input] source={'webcam:0' if is_webcam else video_path} capture_time={webcam_capture_time:.2f}s "
         f"record_whamvideo={int(record_whamvideo)} tcp_requested={int(bool(getattr(gmr_args, 'tcp', False)))} "
         f"tcp_stream_wham={int(tcp_stream_wham)} tcp_stream_gmr={int(tcp_stream_gmr)} "
         f"heartbeat_frames={heartbeat_frames} gmr_preview_fps={gmr_preview_fps:.2f} "
+        f"paced_tcp={int(paced_tcp_preview)} display_response_ms={display_response_s * 1000:.0f} "
         f"low_memory={int(low_memory_mode)} queue_size={pipeline_queue_size}"
     )
     if preview_window_enabled and os.name != 'nt' and not os.environ.get('DISPLAY'):
@@ -683,6 +692,7 @@ def run_stream_mt(
 
     first_frame = None
     ok, probe = cap.read()
+    probe_capture_time = time.time()
     assert ok and probe is not None, f'Failed to read first frame from {video_path}'
     if rotate_deg is not None:
         probe = rotate_frame_bgr(probe, rotate_deg)
@@ -773,7 +783,12 @@ def run_stream_mt(
         and latest_frame_keep == 1 and not adaptive_keep_enabled
     )
     frame_queue = LatestFrameQueue if latest_webcam else lambda: Queue(maxsize=pipeline_queue_size)
-    read_Q = frame_queue()
+    # The camera must keep delivering fresh preview frames while inference lags.
+    read_Q = (
+        LatestFrameQueue()
+        if paced_tcp_preview and os.environ.get("WHAM_LATEST_FRAME", "1") != "0"
+        else frame_queue()
+    )
     det_Q = frame_queue()
     ext_Q = frame_queue()
     wham_Q = frame_queue()
@@ -785,6 +800,19 @@ def run_stream_mt(
     # Frames dropped by the front-of-pipeline latest-frame drain (webcam only),
     # incremented from the detector/wham threads so it lives in a mutable list.
     upstream_drop_count = [0]
+    raw_preview_lock = threading.Lock()
+    raw_preview = {"frame": None, "frame_id": -1, "capture_time": None}
+    last_raw_sample = [float('-inf')]
+
+    def publish_raw_preview(frame_id, capture_time, frame):
+        if not paced_tcp_preview:
+            return
+        now = time.monotonic()
+        if now - last_raw_sample[0] < gmr_preview_interval:
+            return
+        last_raw_sample[0] = now
+        with raw_preview_lock:
+            raw_preview.update(frame=frame.copy(), frame_id=frame_id, capture_time=capture_time)
 
     def safe_qsize(q):
         try:
@@ -1259,9 +1287,11 @@ def run_stream_mt(
     def reader_thread():
         frame_id = 0
         if first_frame is not None:
+            first_capture_time = probe_capture_time
+            publish_raw_preview(frame_id, first_capture_time, first_frame)
             while not stop_event.is_set():
                 try:
-                    read_Q.put((frame_id, time.time(), first_frame), timeout=0.1)
+                    read_Q.put((frame_id, first_capture_time, first_frame), timeout=0.1)
                     break
                 except Full:
                     continue
@@ -1280,9 +1310,11 @@ def run_stream_mt(
                 frame = rotate_frame_bgr(frame, rotate_deg)
             if apply_input_resize:
                 frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+            capture_time = time.time()
+            publish_raw_preview(frame_id, capture_time, frame)
             while not stop_event.is_set():
                 try:
-                    read_Q.put((frame_id, time.time(), frame), timeout=0.1)
+                    read_Q.put((frame_id, capture_time, frame), timeout=0.1)
                     break
                 except Full:
                     continue
@@ -1849,6 +1881,7 @@ def run_stream_mt(
             "worker_dropped": 0,
             "latest_qp": None,
             "latest_frame_id": -1,
+            "latest_capture_time": None,
             "latest_row": None,
             "last_ik_ms": 0.0,
             "last_post_ms": 0.0,
@@ -2524,6 +2557,7 @@ def run_stream_mt(
             state["latest_qp"] = qp.copy()
             state["latest_row"] = row.copy()
             state["latest_frame_id"] = int(frame_id)
+            state["latest_capture_time"] = float(start_time)
             state["worker_last_frame"] = int(frame_id)
             state["worker_last_error"] = None
             state["last_ik_ms"] = ik_ms
@@ -2587,6 +2621,146 @@ def run_stream_mt(
         )
         state["worker_thread"] = worker
         worker.start()
+
+    def paced_preview_worker():
+        """Present current camera and latest robot state on one monotonic clock."""
+        clock = PresentationClock(gmr_preview_fps, time.monotonic())
+        smoothers = {key: DisplayPose(display_response_s) for key in robot_keys}
+        rendered_images = {}
+        rendered_poses = {}
+        robot_pending = False
+        send_times = {0: deque(maxlen=60), 1: deque(maxlen=60)}
+        last_raw_frame_id = -1
+        last_tick = time.monotonic()
+        last_presentation_end = float('-inf')
+        ticks = 0
+        errors = 0
+        tcp = gmr_state.get("tcp_sender")
+        logger.info(
+            f"[Present] started fps={gmr_preview_fps:.2f} "
+            f"response_ms={display_response_s * 1000:.0f} robots={','.join(robot_keys)}"
+        )
+        while not stop_event.is_set():
+            deadline = clock.next_deadline(time.monotonic())
+            if stop_event.wait(max(0.0, deadline - time.monotonic())):
+                break
+            tick = time.monotonic()
+            elapsed = tick - last_tick
+            last_tick = tick
+            ticks += 1
+            robot_capture_times = []
+            for robot_key, state in gmr_states.items():
+                with state["lock"]:
+                    qp = None if state["latest_qp"] is None else state["latest_qp"].copy()
+                    source_time = state["latest_capture_time"]
+                    ready = state["csv_row_count"] > max(0, int(gmr_args.viewer_warmup_frames))
+                if qp is None or not ready:
+                    continue
+                if source_time is not None:
+                    robot_capture_times.append(source_time)
+                try:
+                    init_gmr_state(state, None, create_viewer=True)
+                    viewer = state.get("viewer")
+                    renderer = state.get("renderer")
+                    if viewer is None or renderer is None:
+                        continue
+                    display_qp = smoothers[robot_key].step(qp, elapsed)
+                    previous = rendered_poses.get(robot_key)
+                    if previous is not None and np.allclose(display_qp, previous, atol=1e-4):
+                        continue
+                    pose_for_change_check = display_qp.copy()
+                    if len(gmr_states) > 1:
+                        display_qp[0] += (state["index"] - (len(gmr_states) - 1) * 0.5) * 1.6
+                    viewer.step(
+                        root_pos=display_qp[:3], root_rot=display_qp[3:7],
+                        dof_pos=display_qp[7:], human_motion_data=None,
+                        human_pos_offset=np.array([0.0, 0.0, 0.0]),
+                        show_human_body_name=False, rate_limit=False,
+                        follow_camera=(gmr_args.camera_follow or gmr_args.track),
+                    )
+                    with gpu_shared_slot():
+                        renderer.update_scene(viewer.data, camera=viewer.viewer.cam)
+                        rgb = renderer.render()
+                    rendered_images[robot_key] = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+                    rendered_poses[robot_key] = pose_for_change_check
+                    robot_pending = True
+                except Exception as exc:
+                    errors += 1
+                    if errors <= 3:
+                        logger.warning(f"[Present] robot render failed robot={robot_key}: {exc}")
+
+            # A slow render can finish just before the next grid slot. Space
+            # actual sends too, otherwise a long gap is followed by a burst.
+            if stop_event.wait(max(0.0, last_presentation_end + gmr_preview_interval - time.monotonic())):
+                break
+            # Snapshot after rendering and spacing so a slow MuJoCo pass does
+            # not make the camera image older than necessary.
+            with raw_preview_lock:
+                raw_frame = raw_preview["frame"]
+                raw_frame_id = raw_preview["frame_id"]
+                raw_capture_time = raw_preview["capture_time"]
+            if raw_frame is None and not robot_pending:
+                continue
+            if not tcp.connected:
+                if not tcp.connect():
+                    continue
+                last_raw_frame_id = -1
+                robot_pending = bool(rendered_images)
+            sent_any = False
+            if tcp_stream_wham and raw_frame is not None and raw_frame_id != last_raw_frame_id:
+                if tcp.send_frame(0, raw_frame):
+                    sent_any = True
+                    last_raw_frame_id = raw_frame_id
+                    send_times[0].append(time.monotonic())
+                    if not gmr_state.get("_tcp_wham_logged", False):
+                        logger.info("[TCP] Sent first paced camera frame streamId=0")
+                        gmr_state["_tcp_wham_logged"] = True
+
+            if tcp.connected and robot_pending and len(rendered_images) == len(gmr_states):
+                try:
+                    images = [rendered_images[key] for key in robot_keys]
+                    min_h = min(img.shape[0] for img in images)
+                    fitted = [
+                        cv2.resize(img, (max(1, round(img.shape[1] * min_h / img.shape[0])), min_h),
+                                   interpolation=cv2.INTER_AREA)
+                        if img.shape[0] != min_h else img
+                        for img in images
+                    ]
+                    gmr_bgr = np.concatenate(fitted, axis=1) if len(fitted) > 1 else fitted[0]
+                    if tcp.send_frame(1, gmr_bgr):
+                        sent_any = True
+                        robot_pending = False
+                        send_times[1].append(time.monotonic())
+                        if not gmr_state.get("_tcp_gmr_logged", False):
+                            logger.info(f"[TCP] Sent first paced GMR frame streamId=1 robots={','.join(robot_keys)}")
+                            gmr_state["_tcp_gmr_logged"] = True
+                except Exception as exc:
+                    errors += 1
+                    if errors <= 3:
+                        logger.warning(f"[Present] robot compose/send failed: {exc}")
+
+            if sent_any:
+                last_presentation_end = time.monotonic()
+
+            if ticks % 60 == 0:
+                def gap_p95(stream_id):
+                    times = send_times[stream_id]
+                    return float(np.percentile(np.diff(times), 95) * 1000) if len(times) > 1 else 0.0
+
+                now_wall = time.time()
+                camera_age = (now_wall - raw_capture_time) * 1000 if raw_capture_time else -1.0
+                robot_age = (now_wall - min(robot_capture_times)) * 1000 if robot_capture_times else -1.0
+                logger.info(
+                    f"[Present] slots={ticks} skipped={clock.skipped} "
+                    f"camera_gap_p95_ms={gap_p95(0):.0f} robot_gap_p95_ms={gap_p95(1):.0f} "
+                    f"camera_age_ms={camera_age:.0f} robot_age_ms={robot_age:.0f} render_errors={errors}"
+                )
+        logger.info(f"[Present] stopped slots={ticks} skipped={clock.skipped}")
+
+    present_thread = None
+    if paced_tcp_preview:
+        present_thread = threading.Thread(target=paced_preview_worker, daemon=True, name="tcp-present")
+        present_thread.start()
 
     # Register SIGINT handler so Ctrl+C sets stop flags gracefully instead of
     # interrupting PyTorch / MuJoCo native code mid-operation (which causes segfaults).
@@ -2790,7 +2964,7 @@ def run_stream_mt(
 
                 now_for_preview = time.time()
                 render_gmr_preview_this_frame = (
-                    tcp_stream_gmr and
+                    tcp_stream_gmr and not paced_tcp_preview and
                     (now_for_preview - last_gmr_preview_render_time) >= gmr_preview_interval
                 )
                 rendered_gmr_preview = False
@@ -2996,9 +3170,9 @@ def run_stream_mt(
 
         # Send WHAM frame to Unity via TCP (streamId=0)
         tcp = gmr_state.get("tcp_sender")
-        if tcp_stream_wham and tcp is not None and not tcp.connected:
+        if tcp_stream_wham and not paced_tcp_preview and tcp is not None and not tcp.connected:
             tcp.connect()
-        if tcp_stream_wham and tcp is not None and frame is not None:
+        if tcp_stream_wham and not paced_tcp_preview and tcp is not None and frame is not None:
             if tcp.send_frame(0, frame) and not gmr_state.get("_tcp_wham_logged", False):
                 logger.info("[TCP] Sent first WHAM frame to Unity streamId=0")
                 gmr_state["_tcp_wham_logged"] = True
@@ -3029,6 +3203,10 @@ def run_stream_mt(
             
     if gmr_args is not None:
         stop_event.set()
+        if present_thread is not None:
+            present_thread.join(timeout=6.0)
+            if present_thread.is_alive():
+                logger.warning("[Present] thread still rendering; leaving viewer resources to process exit")
         for state in gmr_states.values():
             q = state.get("worker_queue")
             if q is None:
@@ -3098,7 +3276,7 @@ def run_stream_mt(
                 logger.warning(f"[Capture] No MuJoCo frames captured — render failures={gmr_state.get('_render_failures', 0)}")
             cap_orig.release()
         for state in gmr_states.values():
-            if state.get("viewer") is not None:
+            if state.get("viewer") is not None and (present_thread is None or not present_thread.is_alive()):
                 try:
                     state["viewer"].close()
                 except Exception:
