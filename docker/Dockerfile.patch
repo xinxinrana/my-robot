@@ -19,5 +19,6 @@ COPY scripts/pipeline_watchdog.py /opt/src/wham/scripts/pipeline_watchdog.py
 COPY scripts/latest_frame_queue.py /opt/src/wham/scripts/latest_frame_queue.py
 COPY scripts/presentation_clock.py /opt/src/wham/scripts/presentation_clock.py
 
-# Windows checkout strips the exec bit; the exec-form ENTRYPOINT needs it back.
-RUN chmod +x /opt/src/wham/docker/entrypoint.sh /opt/src/wham/run.sh
+# Windows checkout can also convert LF to CRLF, which breaks the shebang.
+RUN sed -i 's/\r$//' /opt/src/wham/docker/entrypoint.sh /opt/src/wham/run.sh \
+    && chmod +x /opt/src/wham/docker/entrypoint.sh /opt/src/wham/run.sh
