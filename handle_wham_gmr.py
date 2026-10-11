@@ -2631,6 +2631,7 @@ def run_stream_mt(
         rendered_poses = {}
         robot_pending = False
         send_times = {0: deque(maxlen=60), 1: deque(maxlen=60)}
+        timings = {key: deque(maxlen=60) for key in ("render", "camera_send", "robot_send", "tick")}
         last_raw_frame_id = -1
         last_tick = time.monotonic()
         last_presentation_end = float('-inf')
@@ -2646,6 +2647,7 @@ def run_stream_mt(
             if stop_event.wait(max(0.0, deadline - time.monotonic())):
                 break
             tick = time.monotonic()
+            tick_started = time.perf_counter()
             elapsed = tick - last_tick
             last_tick = tick
             ticks += 1
@@ -2660,6 +2662,7 @@ def run_stream_mt(
                 if source_time is not None:
                     robot_capture_times.append(source_time)
                 try:
+                    render_started = time.perf_counter()
                     init_gmr_state(state, None, create_viewer=True)
                     viewer = state.get("viewer")
                     renderer = state.get("renderer")
@@ -2685,6 +2688,7 @@ def run_stream_mt(
                     rendered_images[robot_key] = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
                     rendered_poses[robot_key] = pose_for_change_check
                     robot_pending = True
+                    timings["render"].append((time.perf_counter() - render_started) * 1000)
                 except Exception as exc:
                     errors += 1
                     if errors <= 3:
@@ -2709,7 +2713,10 @@ def run_stream_mt(
                 robot_pending = bool(rendered_images)
             sent_any = False
             if tcp_stream_wham and raw_frame is not None and raw_frame_id != last_raw_frame_id:
-                if tcp.send_frame(0, raw_frame):
+                send_started = time.perf_counter()
+                camera_sent = tcp.send_frame(0, raw_frame)
+                timings["camera_send"].append((time.perf_counter() - send_started) * 1000)
+                if camera_sent:
                     sent_any = True
                     last_raw_frame_id = raw_frame_id
                     send_times[0].append(time.monotonic())
@@ -2728,7 +2735,10 @@ def run_stream_mt(
                         for img in images
                     ]
                     gmr_bgr = np.concatenate(fitted, axis=1) if len(fitted) > 1 else fitted[0]
-                    if tcp.send_frame(1, gmr_bgr):
+                    send_started = time.perf_counter()
+                    robot_sent = tcp.send_frame(1, gmr_bgr)
+                    timings["robot_send"].append((time.perf_counter() - send_started) * 1000)
+                    if robot_sent:
                         sent_any = True
                         robot_pending = False
                         send_times[1].append(time.monotonic())
@@ -2742,11 +2752,16 @@ def run_stream_mt(
 
             if sent_any:
                 last_presentation_end = time.monotonic()
+            timings["tick"].append((time.perf_counter() - tick_started) * 1000)
 
-            if ticks % 60 == 0:
+            if ticks % 20 == 0:
                 def gap_p95(stream_id):
                     times = send_times[stream_id]
                     return float(np.percentile(np.diff(times), 95) * 1000) if len(times) > 1 else 0.0
+
+                def timing_p95(name):
+                    values = timings[name]
+                    return float(np.percentile(values, 95)) if values else 0.0
 
                 now_wall = time.time()
                 camera_age = (now_wall - raw_capture_time) * 1000 if raw_capture_time else -1.0
@@ -2755,6 +2770,12 @@ def run_stream_mt(
                     f"[Present] slots={ticks} skipped={clock.skipped} "
                     f"camera_gap_p95_ms={gap_p95(0):.0f} robot_gap_p95_ms={gap_p95(1):.0f} "
                     f"camera_age_ms={camera_age:.0f} robot_age_ms={robot_age:.0f} render_errors={errors}"
+                )
+                logger.info(
+                    f"[PresentTiming] render_p95_ms={timing_p95('render'):.0f} "
+                    f"camera_send_p95_ms={timing_p95('camera_send'):.0f} "
+                    f"robot_send_p95_ms={timing_p95('robot_send'):.0f} "
+                    f"tick_p95_ms={timing_p95('tick'):.0f}"
                 )
         logger.info(f"[Present] stopped slots={ticks} skipped={clock.skipped}")
 
