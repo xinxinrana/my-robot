@@ -69,6 +69,7 @@ docker run --gpus all --rm \
 ## 备注
 
 - Windows 摄像头实时：用本机 `run.ps1`（`$env:VIDEO="0"`），Docker 透传不了摄像头。
+- Windows 上若 Python 依赖仅在 Docker 镜像内，可在宿主机提供 MJPEG HTTP 摄像头流，并给容器设置 `VIDEO=0`、`WHAM_CAMERA_URL=http://host.docker.internal:<端口>/cam`。它仍按实时摄像头处理，支持最新帧与展示时钟；启动前先确认容器可访问该地址。
 - Linux 摄像头：容器内固定开 `VideoCapture(0)`，所以 `--device /dev/videoN:/dev/video0` 必须映射成 `/dev/video0`。
 
 ## 浏览器实时预览

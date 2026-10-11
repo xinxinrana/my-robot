@@ -646,20 +646,21 @@ def run_stream_mt(
 
     keypoints_normalizer = Normalizer(cfg)
 
+    camera_source = os.environ.get('WHAM_CAMERA_URL') if is_webcam else None
     if is_webcam:
-        cap = cv2.VideoCapture(0)
+        cap = cv2.VideoCapture(camera_source if camera_source else 0)
     else:
         cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         if is_webcam:
             raise RuntimeError(
-                'Failed to open webcam camera 0: no camera device inside the '
-                'container. Mount one with `--device /dev/video0`, or pass a '
-                'video file path instead of 0.'
+                f'Failed to open live camera source {camera_source or 0}: '
+                'mount a camera with `--device /dev/video0` on Linux, '
+                'or set WHAM_CAMERA_URL to a reachable MJPEG source.'
             )
         raise RuntimeError(f'Failed to load video file: {video_path}')
 
-    if is_webcam:
+    if is_webcam and not camera_source:
         # usbipd-passthrough UVC cameras often stall on the default YUYV format
         # (0 frames -> OpenCV select() timeout), while MJPEG streams reliably.
         # Force MJPEG at a supported 640x480 resolution before the first read.
